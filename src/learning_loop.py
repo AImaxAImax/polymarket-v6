@@ -7,11 +7,10 @@ Tracks trade outcomes, learns from patterns, and adjusts conviction weights.
 import json
 import logging
 import sqlite3
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
-
-from pydantic import BaseModel, Field
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 logger = logging.getLogger(__name__)
@@ -22,56 +21,56 @@ DB_PATH = DATA_DIR / "learning.db"
 WEIGHTS_PATH = DATA_DIR / "category_weights.json"
 
 
-class TradeOutcome(BaseModel):
+@dataclass
+class TradeOutcome:
     """A completed trade with outcome data."""
-    
+
     market_id: str
     question: str
-    category: str = "uncategorized"
-    
+
     # Trade details
     direction: str  # YES or NO
-    entry_price: float = Field(ge=0, le=1)
-    exit_price: float = Field(ge=0, le=1)
-    
+    entry_price: float
+    exit_price: float
+
     # AI/Conviction data
-    ai_estimate: float = Field(ge=0, le=1)
-    conviction_score: float = Field(ge=0, le=10)
+    ai_estimate: float
+    conviction_score: float
     edge_at_entry: float  # AI estimate - market price (signed)
-    
-    # Factors that contributed to conviction (JSON)
-    conviction_factors: dict = Field(default_factory=dict)
-    
+
     # Outcome
     resolved_outcome: str  # YES, NO, or INVALID
     is_win: bool
     pnl: float  # Profit/loss as percentage
-    
+
     # Metadata
     entry_timestamp: datetime
     exit_timestamp: datetime
+
+    # Defaults / optional
+    category: str = "uncategorized"
+    conviction_factors: dict = field(default_factory=dict)
     resolution_timestamp: Optional[datetime] = None
-    
-    # Source info
-    sources_used: list[str] = Field(default_factory=list)
+    sources_used: list[str] = field(default_factory=list)
 
 
-class CategoryStats(BaseModel):
+@dataclass
+class CategoryStats:
     """Performance statistics for a category."""
-    
+
     category: str
     trades: int = 0
     wins: int = 0
     losses: int = 0
-    
+
     accuracy: float = 0.0
     avg_edge: float = 0.0
     avg_pnl: float = 0.0
     total_pnl: float = 0.0
-    
+
     # Weight for conviction engine
     weight: float = 1.0
-    last_updated: datetime = Field(default_factory=datetime.utcnow)
+    last_updated: datetime = field(default_factory=datetime.utcnow)
 
 
 class LearningLoop:

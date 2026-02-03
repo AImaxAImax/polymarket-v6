@@ -72,7 +72,9 @@ class ConvictionEngine:
             category_weights_path: Path to category weights JSON file
         """
         if category_weights_path is None:
-            category_weights_path = Path(__file__).parent / "category_weights.json"
+            data_path = Path(__file__).parent.parent / "data" / "category_weights.json"
+            fallback = Path(__file__).parent / "category_weights.json"
+            category_weights_path = data_path if data_path.exists() else fallback
         
         self.category_weights_path = category_weights_path
         self.category_weights = self._load_category_weights()
