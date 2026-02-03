@@ -479,10 +479,11 @@ class PositionManager:
         position.peak_price = max(position.peak_price, current_price)
         
         if position.avg_entry_price > 0 and position.current_size_usd > 0:
-            # For YES: profit when price goes up
-            # For NO: we're buying NO shares, so profit when NO price goes up (YES goes down)
-            price_change_pct = (current_price - position.avg_entry_price) / position.avg_entry_price
-            
+            if position.direction == Direction.NO:
+                price_change_pct = (position.avg_entry_price - current_price) / position.avg_entry_price
+            else:
+                price_change_pct = (current_price - position.avg_entry_price) / position.avg_entry_price
+
             position.unrealized_pnl_pct = price_change_pct
             position.unrealized_pnl = position.current_size_usd * price_change_pct
     

@@ -13,7 +13,8 @@ from urllib.parse import quote_plus
 from tqdm.asyncio import tqdm
 import logging
 
-from .database import Database, ScanResult
+from .database import Database
+from .models import AlphaOpportunity
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +115,7 @@ class DeepResearcher:
         self.search_client.semaphore = asyncio.Semaphore(max_concurrent_searches)
         self.analysis_semaphore = asyncio.Semaphore(max_concurrent_analysis)
     
-    def _build_queries(self, candidate: ScanResult) -> Dict[str, str]:
+    def _build_queries(self, candidate: AlphaOpportunity) -> Dict[str, str]:
         """Build 3 search queries for a market."""
         # Extract key terms from question
         question = candidate.question
@@ -128,7 +129,7 @@ class DeepResearcher:
             "resolution": f"{search_terms} official announcement result outcome"
         }
     
-    async def gather_research(self, candidate: ScanResult) -> ResearchBundle:
+    async def gather_research(self, candidate: AlphaOpportunity) -> ResearchBundle:
         """Gather all research for a candidate market."""
         queries = self._build_queries(candidate)
         
@@ -160,7 +161,7 @@ class DeepResearcher:
         )
     
     async def analyze_research(self, bundle: ResearchBundle,
-                               original_result: ScanResult) -> Tuple[str, float, str]:
+                               original_result: AlphaOpportunity) -> Tuple[str, float, str]:
         """
         Analyze research bundle with Ollama to validate edge.
         
@@ -171,7 +172,7 @@ class DeepResearcher:
             return await self._do_analysis(bundle, original_result)
     
     async def _do_analysis(self, bundle: ResearchBundle,
-                           original: ScanResult) -> Tuple[str, float, str]:
+                           original: AlphaOpportunity) -> Tuple[str, float, str]:
         """Execute Ollama analysis."""
         # Build context from research
         context_parts = []
@@ -198,8 +199,8 @@ class DeepResearcher:
 MARKET: {bundle.question}
 Current Market Price: {original.market_price:.2%}
 Initial AI Estimate: {original.ai_estimate:.2%}
-Initial Edge: {original.edge:+.2%}
-Initial Reasoning: {original.reasoning}
+Initial Edge: {(original.ai_estimate - original.market_price):+.2%}
+Initial Reasoning: {original.reasoning or "Not provided"}
 
 RESEARCH GATHERED:
 {context}
@@ -244,7 +245,7 @@ Only output the JSON."""
             return f"Error: {e}", original.edge, "SKIP"
     
     def _parse_analysis(self, response: str,
-                       original: ScanResult) -> Tuple[str, float, str]:
+                       original: AlphaOpportunity) -> Tuple[str, float, str]:
         """Parse Ollama analysis response."""
         try:
             json_match = re.search(r'\{[^}]+\}', response, re.DOTALL)

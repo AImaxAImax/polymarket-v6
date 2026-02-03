@@ -46,7 +46,11 @@ class Database:
         -- Trading signals
         edge REAL,
         signal TEXT,
-        recommended_size REAL
+        recommended_size REAL,
+
+        -- Phase 2 validation (optional)
+        validated_edge REAL,
+        final_decision TEXT
     );
     
     CREATE INDEX IF NOT EXISTS idx_status ON markets(status);
@@ -127,15 +131,17 @@ class Database:
                     first_seen_at, last_updated_at, resolved_at,
                     researched_at, research_summary,
                     ai_probability, ai_confidence, ai_reasoning, analyzed_at,
-                    edge, signal, recommended_size
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    edge, signal, recommended_size,
+                    validated_edge, final_decision
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 market.id, market.question, market.description, market.category, market.end_date,
                 market.yes_price, market.no_price, market.volume, market.liquidity, market.status,
                 market.first_seen_at, market.last_updated_at, market.resolved_at,
                 market.researched_at, market.research_summary,
                 market.ai_probability, market.ai_confidence, market.ai_reasoning, market.analyzed_at,
-                market.edge, market.signal, market.recommended_size
+                market.edge, market.signal, market.recommended_size,
+                None, None
             ))
             
             return is_new
@@ -220,15 +226,62 @@ class Database:
             rows = conn.execute(query, (min_edge, min_confidence)).fetchall()
             return [self._row_to_market(row) for row in rows]
     
-    def update_research(self, market_id: str, research_summary: str):
+    def update_research(self, market_id: str, research_summary: str,
+                        validated_edge: Optional[float] = None,
+                        final_decision: Optional[str] = None):
         """Update research data for a market."""
         now = datetime.utcnow().isoformat()
         with self._connect() as conn:
             conn.execute("""
                 UPDATE markets 
-                SET research_summary = ?, researched_at = ?, last_updated_at = ?
+                SET research_summary = ?,
+                    researched_at = ?,
+                    last_updated_at = ?,
+                    validated_edge = COALESCE(?, validated_edge),
+                    final_decision = COALESCE(?, final_decision)
                 WHERE id = ?
-            """, (research_summary, now, now, market_id))
+            """, (research_summary, now, now, validated_edge, final_decision, market_id))
+
+    def get_phase1_candidates(self, min_edge: float = 0.05) -> List["AlphaOpportunity"]:
+        """Return Phase 1 candidates as alpha opportunities."""
+        from .models import AlphaOpportunity, Direction
+
+        query = """
+            SELECT id, question, category, yes_price, ai_probability, edge, ai_reasoning,
+                   volume, liquidity
+            FROM markets
+            WHERE status = 'active'
+              AND ai_probability IS NOT NULL
+              AND edge IS NOT NULL
+              AND ABS(edge) >= ?
+            ORDER BY ABS(edge) DESC
+        """
+        with self._connect() as conn:
+            rows = conn.execute(query, (min_edge,)).fetchall()
+
+        candidates = []
+        for row in rows:
+            market_price = row["yes_price"] or 0.5
+            ai_estimate = row["ai_probability"]
+            edge = ai_estimate - market_price
+            direction = Direction.YES if edge >= 0 else Direction.NO
+            candidates.append(
+                AlphaOpportunity(
+                    market_id=row["id"],
+                    question=row["question"],
+                    category=row["category"],
+                    slug=row["id"],
+                    market_price=market_price,
+                    ai_estimate=ai_estimate,
+                    edge_pct=abs(edge) * 100,
+                    direction=direction,
+                    volume_24h=row["volume"] or 0.0,
+                    liquidity=row["liquidity"] or 0.0,
+                    reasoning=row["ai_reasoning"],
+                )
+            )
+
+        return candidates
     
     def update_analysis(self, market_id: str, probability: float, confidence: float, 
                         reasoning: str, edge: float, signal: str, recommended_size: float):
