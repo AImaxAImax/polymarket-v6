@@ -1,220 +1,338 @@
-"""
-SQLite persistence layer for alpha scanner results.
-"""
+"""SQLite database wrapper for Polymarket V6."""
 import sqlite3
-import json
-from datetime import datetime
 from pathlib import Path
-from typing import Optional, List, Dict, Any
-from dataclasses import dataclass, asdict
-import threading
+from datetime import datetime
+from typing import Optional, List, Tuple
+from contextlib import contextmanager
 
-@dataclass
-class ScanResult:
-    """Phase 1 scan result."""
-    id: Optional[int] = None
-    market_id: str = ""
-    question: str = ""
-    market_price: float = 0.0
-    ai_estimate: float = 0.0
-    edge: float = 0.0
-    confidence: float = 0.0
-    reasoning: str = ""
-    scanned_at: str = ""
-    phase: int = 1
-    
-    # Phase 2 fields
-    researched_at: Optional[str] = None
-    research_summary: Optional[str] = None
-    validated_edge: Optional[float] = None
-    final_decision: Optional[str] = None
+from .models import Market
+
 
 class Database:
-    """Thread-safe SQLite database for scan results."""
+    """SQLite database wrapper with upsert and maintenance operations."""
     
-    def __init__(self, db_path: str = "data/scans.db"):
+    SCHEMA = """
+    CREATE TABLE IF NOT EXISTS markets (
+        id TEXT PRIMARY KEY,
+        question TEXT NOT NULL,
+        description TEXT,
+        category TEXT,
+        end_date TEXT,
+        
+        -- Prices (updated frequently)
+        yes_price REAL,
+        no_price REAL,
+        
+        -- Metrics
+        volume REAL DEFAULT 0,
+        liquidity REAL DEFAULT 0,
+        
+        -- Status tracking
+        status TEXT DEFAULT 'active',
+        first_seen_at TEXT,
+        last_updated_at TEXT,
+        resolved_at TEXT,
+        
+        -- Research data
+        researched_at TEXT,
+        research_summary TEXT,
+        
+        -- AI analysis (with research context)
+        ai_probability REAL,
+        ai_confidence REAL,
+        ai_reasoning TEXT,
+        analyzed_at TEXT,
+        
+        -- Trading signals
+        edge REAL,
+        signal TEXT,
+        recommended_size REAL
+    );
+    
+    CREATE INDEX IF NOT EXISTS idx_status ON markets(status);
+    CREATE INDEX IF NOT EXISTS idx_edge ON markets(edge);
+    CREATE INDEX IF NOT EXISTS idx_first_seen ON markets(first_seen_at);
+    CREATE INDEX IF NOT EXISTS idx_signal ON markets(signal);
+    CREATE INDEX IF NOT EXISTS idx_analyzed ON markets(analyzed_at);
+    """
+    
+    def __init__(self, db_path: str = "data/markets.db"):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._local = threading.local()
-        self._init_schema()
+        self._init_db()
     
-    def _get_conn(self) -> sqlite3.Connection:
-        """Get thread-local connection."""
-        if not hasattr(self._local, 'conn') or self._local.conn is None:
-            self._local.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-            self._local.conn.row_factory = sqlite3.Row
-        return self._local.conn
+    def _init_db(self):
+        """Initialize database with schema."""
+        with self._connect() as conn:
+            conn.executescript(self.SCHEMA)
     
-    def _init_schema(self):
-        """Initialize database schema."""
-        conn = self._get_conn()
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS scan_results (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                market_id TEXT UNIQUE NOT NULL,
-                question TEXT NOT NULL,
-                market_price REAL NOT NULL,
-                ai_estimate REAL NOT NULL,
-                edge REAL NOT NULL,
-                confidence REAL NOT NULL,
-                reasoning TEXT,
-                scanned_at TEXT NOT NULL,
-                phase INTEGER DEFAULT 1,
-                
-                -- Phase 2 fields
-                researched_at TEXT,
-                research_summary TEXT,
-                validated_edge REAL,
-                final_decision TEXT,
-                
-                -- Indexes
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            );
+    @contextmanager
+    def _connect(self):
+        """Context manager for database connections."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
+    
+    def upsert_market(self, market: Market) -> bool:
+        """
+        Upsert a market. Returns True if this is a NEW market.
+        Preserves first_seen_at and research data for existing markets.
+        """
+        now = datetime.utcnow().isoformat()
+        
+        with self._connect() as conn:
+            # Check if market exists
+            existing = conn.execute(
+                "SELECT id, first_seen_at, researched_at, research_summary, "
+                "ai_probability, ai_confidence, ai_reasoning, analyzed_at, "
+                "edge, signal, recommended_size FROM markets WHERE id = ?",
+                (market.id,)
+            ).fetchone()
             
-            CREATE INDEX IF NOT EXISTS idx_edge ON scan_results(edge);
-            CREATE INDEX IF NOT EXISTS idx_phase ON scan_results(phase);
-            CREATE INDEX IF NOT EXISTS idx_market_id ON scan_results(market_id);
-            CREATE INDEX IF NOT EXISTS idx_final_decision ON scan_results(final_decision);
-        """)
-        conn.commit()
+            is_new = existing is None
+            
+            if is_new:
+                # New market - insert with first_seen_at
+                market.first_seen_at = now
+                market.last_updated_at = now
+            else:
+                # Existing market - preserve research and analysis data
+                market.first_seen_at = existing["first_seen_at"]
+                market.last_updated_at = now
+                
+                # Keep existing research if not provided
+                if not market.researched_at:
+                    market.researched_at = existing["researched_at"]
+                    market.research_summary = existing["research_summary"]
+                
+                # Keep existing analysis if not provided
+                if not market.analyzed_at:
+                    market.analyzed_at = existing["analyzed_at"]
+                    market.ai_probability = existing["ai_probability"]
+                    market.ai_confidence = existing["ai_confidence"]
+                    market.ai_reasoning = existing["ai_reasoning"]
+                    market.edge = existing["edge"]
+                    market.signal = existing["signal"]
+                    market.recommended_size = existing["recommended_size"]
+            
+            # Upsert
+            conn.execute("""
+                INSERT OR REPLACE INTO markets (
+                    id, question, description, category, end_date,
+                    yes_price, no_price, volume, liquidity, status,
+                    first_seen_at, last_updated_at, resolved_at,
+                    researched_at, research_summary,
+                    ai_probability, ai_confidence, ai_reasoning, analyzed_at,
+                    edge, signal, recommended_size
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                market.id, market.question, market.description, market.category, market.end_date,
+                market.yes_price, market.no_price, market.volume, market.liquidity, market.status,
+                market.first_seen_at, market.last_updated_at, market.resolved_at,
+                market.researched_at, market.research_summary,
+                market.ai_probability, market.ai_confidence, market.ai_reasoning, market.analyzed_at,
+                market.edge, market.signal, market.recommended_size
+            ))
+            
+            return is_new
     
-    def upsert_scan(self, result: ScanResult) -> int:
-        """Insert or update a scan result."""
-        conn = self._get_conn()
-        cursor = conn.execute("""
-            INSERT INTO scan_results (
-                market_id, question, market_price, ai_estimate, edge,
-                confidence, reasoning, scanned_at, phase
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(market_id) DO UPDATE SET
-                question = excluded.question,
-                market_price = excluded.market_price,
-                ai_estimate = excluded.ai_estimate,
-                edge = excluded.edge,
-                confidence = excluded.confidence,
-                reasoning = excluded.reasoning,
-                scanned_at = excluded.scanned_at,
-                phase = excluded.phase
-        """, (
-            result.market_id, result.question, result.market_price,
-            result.ai_estimate, result.edge, result.confidence,
-            result.reasoning, result.scanned_at, result.phase
-        ))
-        conn.commit()
-        return cursor.lastrowid
+    def upsert_markets(self, markets: List[Market]) -> List[str]:
+        """Upsert multiple markets. Returns list of NEW market IDs."""
+        new_ids = []
+        for market in markets:
+            if self.upsert_market(market):
+                new_ids.append(market.id)
+        return new_ids
     
-    def update_research(self, market_id: str, research_summary: str,
-                       validated_edge: float, final_decision: str) -> bool:
-        """Update Phase 2 research results."""
-        conn = self._get_conn()
-        cursor = conn.execute("""
-            UPDATE scan_results SET
-                researched_at = ?,
-                research_summary = ?,
-                validated_edge = ?,
-                final_decision = ?,
-                phase = 2
-            WHERE market_id = ?
-        """, (
-            datetime.utcnow().isoformat(),
-            research_summary,
-            validated_edge,
-            final_decision,
-            market_id
-        ))
-        conn.commit()
-        return cursor.rowcount > 0
+    def get_market(self, market_id: str) -> Optional[Market]:
+        """Get a single market by ID."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM markets WHERE id = ?", (market_id,)).fetchone()
+            if row:
+                return self._row_to_market(row)
+        return None
     
-    def get_phase1_candidates(self, min_edge: float = 0.05) -> List[ScanResult]:
-        """Get Phase 1 results with edge above threshold for Phase 2 processing."""
-        conn = self._get_conn()
-        cursor = conn.execute("""
-            SELECT * FROM scan_results
-            WHERE edge >= ? AND (phase = 1 OR researched_at IS NULL)
+    def get_markets(self, 
+                    status: Optional[str] = None,
+                    needs_research: bool = False,
+                    needs_analysis: bool = False,
+                    has_signal: Optional[str] = None,
+                    min_edge: Optional[float] = None,
+                    limit: Optional[int] = None) -> List[Market]:
+        """Get markets with filters."""
+        query = "SELECT * FROM markets WHERE 1=1"
+        params = []
+        
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        
+        if needs_research:
+            query += " AND (researched_at IS NULL OR researched_at < date('now', '-7 days'))"
+        
+        if needs_analysis:
+            query += " AND researched_at IS NOT NULL AND (analyzed_at IS NULL OR analyzed_at < researched_at)"
+        
+        if has_signal:
+            query += " AND signal = ?"
+            params.append(has_signal)
+        
+        if min_edge is not None:
+            query += " AND edge >= ?"
+            params.append(min_edge)
+        
+        query += " ORDER BY first_seen_at DESC"
+        
+        if limit:
+            query += " LIMIT ?"
+            params.append(limit)
+        
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [self._row_to_market(row) for row in rows]
+    
+    def get_new_markets(self, since_hours: int = 24) -> List[Market]:
+        """Get markets first seen in the last N hours."""
+        query = """
+            SELECT * FROM markets 
+            WHERE first_seen_at > datetime('now', ?)
+            ORDER BY first_seen_at DESC
+        """
+        with self._connect() as conn:
+            rows = conn.execute(query, (f'-{since_hours} hours',)).fetchall()
+            return [self._row_to_market(row) for row in rows]
+    
+    def get_opportunities(self, min_edge: float = 0.05, min_confidence: float = 0.6) -> List[Market]:
+        """Get markets with positive edge and high confidence."""
+        query = """
+            SELECT * FROM markets 
+            WHERE signal = 'BUY' 
+            AND edge >= ? 
+            AND ai_confidence >= ?
+            AND status = 'active'
             ORDER BY edge DESC
-        """, (min_edge,))
-        return [self._row_to_result(row) for row in cursor.fetchall()]
+        """
+        with self._connect() as conn:
+            rows = conn.execute(query, (min_edge, min_confidence)).fetchall()
+            return [self._row_to_market(row) for row in rows]
     
-    def get_results(self, min_edge: float = 0.0, phase: Optional[int] = None,
-                   final_decision: Optional[str] = None,
-                   limit: int = 100) -> List[ScanResult]:
-        """Get scan results with filters."""
-        conn = self._get_conn()
-        query = "SELECT * FROM scan_results WHERE edge >= ?"
-        params: List[Any] = [min_edge]
-        
-        if phase is not None:
-            query += " AND phase = ?"
-            params.append(phase)
-        
-        if final_decision is not None:
-            query += " AND final_decision = ?"
-            params.append(final_decision)
-        
-        query += " ORDER BY edge DESC LIMIT ?"
-        params.append(limit)
-        
-        cursor = conn.execute(query, params)
-        return [self._row_to_result(row) for row in cursor.fetchall()]
+    def update_research(self, market_id: str, research_summary: str):
+        """Update research data for a market."""
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute("""
+                UPDATE markets 
+                SET research_summary = ?, researched_at = ?, last_updated_at = ?
+                WHERE id = ?
+            """, (research_summary, now, now, market_id))
     
-    def get_alpha_opportunities(self, min_validated_edge: float = 0.05) -> List[ScanResult]:
-        """Get confirmed alpha opportunities from Phase 2."""
-        conn = self._get_conn()
-        cursor = conn.execute("""
-            SELECT * FROM scan_results
-            WHERE phase = 2 
-            AND final_decision = 'BUY'
-            AND validated_edge >= ?
-            ORDER BY validated_edge DESC
-        """, (min_validated_edge,))
-        return [self._row_to_result(row) for row in cursor.fetchall()]
+    def update_analysis(self, market_id: str, probability: float, confidence: float, 
+                        reasoning: str, edge: float, signal: str, recommended_size: float):
+        """Update AI analysis for a market."""
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute("""
+                UPDATE markets 
+                SET ai_probability = ?, ai_confidence = ?, ai_reasoning = ?,
+                    edge = ?, signal = ?, recommended_size = ?,
+                    analyzed_at = ?, last_updated_at = ?
+                WHERE id = ?
+            """, (probability, confidence, reasoning, edge, signal, recommended_size, now, now, market_id))
     
-    def get_stats(self) -> Dict[str, Any]:
-        """Get database statistics."""
-        conn = self._get_conn()
+    def mark_resolved(self, market_id: str):
+        """Mark a market as resolved."""
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute("""
+                UPDATE markets 
+                SET status = 'resolved', resolved_at = ?, last_updated_at = ?
+                WHERE id = ?
+            """, (now, now, market_id))
+    
+    def maintenance(self) -> dict:
+        """
+        Run maintenance tasks:
+        - Remove very old resolved markets (>30 days)
+        - Return stats
+        """
         stats = {}
         
-        cursor = conn.execute("SELECT COUNT(*) FROM scan_results")
-        stats['total_scans'] = cursor.fetchone()[0]
-        
-        cursor = conn.execute("SELECT COUNT(*) FROM scan_results WHERE phase = 1")
-        stats['phase1_only'] = cursor.fetchone()[0]
-        
-        cursor = conn.execute("SELECT COUNT(*) FROM scan_results WHERE phase = 2")
-        stats['phase2_complete'] = cursor.fetchone()[0]
-        
-        cursor = conn.execute("SELECT COUNT(*) FROM scan_results WHERE edge >= 0.05")
-        stats['candidates'] = cursor.fetchone()[0]
-        
-        cursor = conn.execute("SELECT COUNT(*) FROM scan_results WHERE final_decision = 'BUY'")
-        stats['buy_signals'] = cursor.fetchone()[0]
-        
-        cursor = conn.execute("SELECT AVG(edge) FROM scan_results WHERE edge >= 0.05")
-        stats['avg_edge'] = cursor.fetchone()[0] or 0
+        with self._connect() as conn:
+            # Count by status
+            for status in ['active', 'resolved', 'closed']:
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM markets WHERE status = ?", (status,)
+                ).fetchone()[0]
+                stats[f"{status}_count"] = count
+            
+            # Remove old resolved markets
+            result = conn.execute("""
+                DELETE FROM markets 
+                WHERE status = 'resolved' 
+                AND resolved_at < datetime('now', '-30 days')
+            """)
+            stats["purged_old_resolved"] = result.rowcount
+            
+            # Count markets needing research
+            stats["needs_research"] = conn.execute("""
+                SELECT COUNT(*) FROM markets 
+                WHERE status = 'active' 
+                AND (researched_at IS NULL OR researched_at < datetime('now', '-7 days'))
+            """).fetchone()[0]
+            
+            # Count markets needing analysis
+            stats["needs_analysis"] = conn.execute("""
+                SELECT COUNT(*) FROM markets 
+                WHERE status = 'active'
+                AND researched_at IS NOT NULL 
+                AND (analyzed_at IS NULL OR analyzed_at < researched_at)
+            """).fetchone()[0]
+            
+            # Total markets
+            stats["total"] = conn.execute("SELECT COUNT(*) FROM markets").fetchone()[0]
         
         return stats
     
-    def clear_all(self):
-        """Clear all scan results."""
-        conn = self._get_conn()
-        conn.execute("DELETE FROM scan_results")
-        conn.commit()
+    def get_stats(self) -> dict:
+        """Get database statistics."""
+        with self._connect() as conn:
+            stats = {
+                "total": conn.execute("SELECT COUNT(*) FROM markets").fetchone()[0],
+                "active": conn.execute("SELECT COUNT(*) FROM markets WHERE status = 'active'").fetchone()[0],
+                "resolved": conn.execute("SELECT COUNT(*) FROM markets WHERE status = 'resolved'").fetchone()[0],
+                "with_research": conn.execute("SELECT COUNT(*) FROM markets WHERE researched_at IS NOT NULL").fetchone()[0],
+                "with_analysis": conn.execute("SELECT COUNT(*) FROM markets WHERE analyzed_at IS NOT NULL").fetchone()[0],
+                "buy_signals": conn.execute("SELECT COUNT(*) FROM markets WHERE signal = 'BUY'").fetchone()[0],
+            }
+        return stats
     
-    def _row_to_result(self, row: sqlite3.Row) -> ScanResult:
-        """Convert database row to ScanResult."""
-        return ScanResult(
-            id=row['id'],
-            market_id=row['market_id'],
-            question=row['question'],
-            market_price=row['market_price'],
-            ai_estimate=row['ai_estimate'],
-            edge=row['edge'],
-            confidence=row['confidence'],
-            reasoning=row['reasoning'],
-            scanned_at=row['scanned_at'],
-            phase=row['phase'],
-            researched_at=row['researched_at'],
-            research_summary=row['research_summary'],
-            validated_edge=row['validated_edge'],
-            final_decision=row['final_decision']
+    def _row_to_market(self, row: sqlite3.Row) -> Market:
+        """Convert a database row to a Market object."""
+        return Market(
+            id=row["id"],
+            question=row["question"],
+            description=row["description"],
+            category=row["category"],
+            end_date=row["end_date"],
+            yes_price=row["yes_price"],
+            no_price=row["no_price"],
+            volume=row["volume"],
+            liquidity=row["liquidity"],
+            status=row["status"],
+            first_seen_at=row["first_seen_at"],
+            last_updated_at=row["last_updated_at"],
+            resolved_at=row["resolved_at"],
+            researched_at=row["researched_at"],
+            research_summary=row["research_summary"],
+            ai_probability=row["ai_probability"],
+            ai_confidence=row["ai_confidence"],
+            ai_reasoning=row["ai_reasoning"],
+            analyzed_at=row["analyzed_at"],
+            edge=row["edge"],
+            signal=row["signal"],
+            recommended_size=row["recommended_size"],
         )
