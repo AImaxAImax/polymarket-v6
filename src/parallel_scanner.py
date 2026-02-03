@@ -12,7 +12,8 @@ from dataclasses import dataclass
 from tqdm.asyncio import tqdm
 import logging
 
-from .database import Database, ScanResult
+from .database import Database
+from .models import ScanResult
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,8 @@ class PolymarketClient:
                 params = {
                     "limit": limit,
                     "offset": offset,
-                    "active": str(active_only).lower()
+                    "active": str(active_only).lower(),
+                    "closed": "false"
                 }
                 async with self.session.get(
                     f"{self.base_url}/markets",
