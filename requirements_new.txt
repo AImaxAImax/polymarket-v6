@@ -1,0 +1,5 @@
+# Polymarket V6 Alpha Scanner Dependencies
+aiohttp>=3.9.0
+asyncio>=3.4.3
+tqdm>=4.66.0
+rich>=13.7.0

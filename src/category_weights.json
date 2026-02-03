@@ -1,0 +1,16 @@
+{
+  "Crypto": 1.0,
+  "Stocks": 1.0,
+  "Politics": 1.0,
+  "Economics": 1.0,
+  "Sports": 1.0,
+  "Tech": 1.0,
+  "Business": 1.0,
+  "World": 1.0,
+  "Entertainment": 1.0,
+  "Science": 1.0,
+  "Weather": 1.0,
+  "Legal": 1.0,
+  "Elections": 1.0,
+  "Other": 1.0
+}
