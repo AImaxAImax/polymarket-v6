@@ -147,7 +147,7 @@ class Scanner:
             await engine.research_markets(new_markets, self.db)
         
         # Re-fetch markets with research data
-        new_markets = [self.db.get_market(mid) for mid in new_ids[:limit] if limit else new_ids]
+        new_markets = [self.db.get_market(mid) for mid in (new_ids[:limit] if limit else new_ids)]
         new_markets = [m for m in new_markets if m and m.research_summary]
         
         # Analyze new markets

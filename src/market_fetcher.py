@@ -66,7 +66,7 @@ class MarketFetcher:
             params = {
                 "limit": page_size,
                 "offset": offset,
-                "active": "true",
+                "active": "true", "closed": "false",
             }
             
             try:
