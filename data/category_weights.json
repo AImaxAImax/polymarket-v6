@@ -1,0 +1,12 @@
+{
+  "politics": 1.0,
+  "crypto": 1.0,
+  "sports": 1.0,
+  "entertainment": 1.0,
+  "science": 1.0,
+  "tech": 1.0,
+  "business": 1.0,
+  "uncategorized": 1.0,
+  "_last_updated": "2026-02-03T00:00:00Z",
+  "_note": "Weights are auto-updated weekly based on category accuracy. >70% accuracy = 1.2, 50-70% = 1.0, <50% = 0.7"
+}
